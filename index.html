@@ -1503,6 +1503,8 @@ async function runPipeline() {
 
   const encoder = new VideoEncoder({
     output: (chunk, meta) => {
+      // Decrement own counter on every output (one frame finished encoding)
+      encoderInflight = Math.max(0, encoderInflight - 1);
       if (meta && meta.decoderConfig && !meta.decoderConfig.colorSpace) {
         meta.decoderConfig.colorSpace = {
           primaries: 'bt709', transfer: 'bt709', matrix: 'bt709', fullRange: false,
@@ -1521,6 +1523,13 @@ async function runPipeline() {
   log('webgl2 shader compiled');
 
   let frameIdx = 0;
+  // Own-counter backpressure: WebCodecs' decoder.decodeQueueSize is unreliable on
+  // Samsung Internet (returns 0 even when many frames are queued). Track in/out
+  // events ourselves. Increment per .decode()/.encode() call; decrement when the
+  // corresponding output() fires. The pump-loop gate uses these instead of the
+  // WebCodecs queue properties.
+  let decoderInflight = 0;
+  let encoderInflight = 0;
   const startTime = performance.now();
   const state = { gains: null, los: null, his: null, mR: null, mG: null, mB: null };
   const scratchCanvas = new OffscreenCanvas(Math.max(w >> 2, 64), Math.max(h >> 2, 36));
@@ -1534,6 +1543,8 @@ async function runPipeline() {
 
   const decoder = new VideoDecoder({
     output: (frame) => {
+      // Decrement own counter immediately on output (one frame finished decoding)
+      decoderInflight = Math.max(0, decoderInflight - 1);
       try {
         const stats = computeFrameStats(frame, scratchCanvas, scratchCanvas.width, scratchCanvas.height);
         if (state.gains) {
@@ -1569,6 +1580,7 @@ async function runPipeline() {
         const outFrame = new VideoFrame(glCanvas, { timestamp: frame.timestamp, duration: frame.duration });
         frame.close();
         const keyFrame = (frameIdx % Math.round(fps * 2) === 0);
+        encoderInflight++;
         encoder.encode(outFrame, { keyFrame });
         outFrame.close();
 
@@ -1578,7 +1590,7 @@ async function runPipeline() {
           const procFps = frameIdx / elapsed;
           const eta = (totalFrames - frameIdx) / Math.max(procFps, 0.1);
           $('progress-bar').style.width = (frameIdx / totalFrames * 100) + '%';
-          $('prog-l').textContent = `${frameIdx} / ${totalFrames} · q ${decoder.decodeQueueSize}/${encoder.encodeQueueSize}`;
+          $('prog-l').textContent = `${frameIdx} / ${totalFrames} · q ${decoderInflight}/${encoderInflight}`;
           let memTxt = '';
           if (performance.memory && performance.memory.usedJSHeapSize) {
             memTxt = ` · ${(performance.memory.usedJSHeapSize / 1024 / 1024).toFixed(0)}MB`;
@@ -1625,6 +1637,7 @@ async function runPipeline() {
           duration: s.duration * 1_000_000 / s.timescale,
           data: s.data,
         }));
+        decoderInflight++;
       }
     } else if (muxAudio && audioTrack && id === audioTrack.id) {
       for (const s of samples) {
@@ -1664,7 +1677,11 @@ async function runPipeline() {
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
   let offset = 0;
   while (offset < sourceFile.size) {
-    while (encoder.encodeQueueSize > QMAX || decoder.decodeQueueSize > QMAX) {
+    // Gate on OWN counters — decoder/encoder.decodeQueueSize is unreliable on
+    // Samsung Internet. The own-counter values are decremented in the
+    // decoder/encoder output() callbacks above, which run on the same JS event
+    // loop, so this gate is precise.
+    while (encoderInflight > QMAX || decoderInflight > QMAX) {
       await sleep(40);
     }
     const slice = sourceFile.slice(offset, Math.min(offset + CHUNK, sourceFile.size));
