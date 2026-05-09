@@ -1329,14 +1329,37 @@ function buildLuts(gains, los, his, scurve = true, sat = 1.10) {
   return out;
 }
 
+// Module-level pre-allocated buffers for stats. Allocating ~6 MB of typed
+// arrays per frame leaks ~1 GB of pending GC garbage on Samsung Internet
+// before the collector can run, OOM-killing the tab around 260 frames at 4K.
+// We reuse these arrays across all frames; size is tied to the downsample
+// dimensions (set once in runPipeline).
+let _statsBuf = null;
+function ensureStatsBuf(N) {
+  if (_statsBuf && _statsBuf.N === N) return _statsBuf;
+  _statsBuf = {
+    N,
+    f: new Float32Array(N * 3),
+    gainedR: new Float32Array(N),
+    gainedG: new Float32Array(N),
+    gainedB: new Float32Array(N),
+    sorted: new Float32Array(N),  // reused for all 6 percentile calls
+  };
+  return _statsBuf;
+}
+
 function computeFrameStats(frame, scratchCanvas, downsampleW, downsampleH) {
   const ctx = scratchCanvas.getContext('2d', { willReadFrequently: true });
   scratchCanvas.width = downsampleW;
   scratchCanvas.height = downsampleH;
   ctx.drawImage(frame, 0, 0, downsampleW, downsampleH);
+  // getImageData still allocates a Uint8ClampedArray, but it's released as
+  // soon as this function returns (no closure captures it).
   const data = ctx.getImageData(0, 0, downsampleW, downsampleH).data;
-  let sumR=0, sumG=0, sumB=0;
   const N = downsampleW * downsampleH;
+  const buf = ensureStatsBuf(N);
+
+  let sumR = 0, sumG = 0, sumB = 0;
   for (let i = 0; i < data.length; i += 4) {
     sumR += data[i]; sumG += data[i+1]; sumB += data[i+2];
   }
@@ -1344,7 +1367,7 @@ function computeFrameStats(frame, scratchCanvas, downsampleW, downsampleH) {
   const mG = sumG / N / 255;
   const mB = sumB / N / 255;
 
-  const f = new Float32Array(N * 3);
+  const f = buf.f;  // reuse
   const redCoef = mG > mR ? (mG - mR) : 0;
   const blueCoef = (mB < mG * 0.7) ? 0.4 * (mG - mB) : 0;
   for (let i = 0, j = 0; i < data.length; i += 4, j += 3) {
@@ -1353,7 +1376,7 @@ function computeFrameStats(frame, scratchCanvas, downsampleW, downsampleH) {
     if (blueCoef > 0) b = Math.min(1, b + blueCoef * (1 - b) * g);
     f[j] = r; f[j+1] = g; f[j+2] = b;
   }
-  let mR2=0, mG2=0, mB2=0;
+  let mR2 = 0, mG2 = 0, mB2 = 0;
   for (let j = 0; j < f.length; j += 3) { mR2 += f[j]; mG2 += f[j+1]; mB2 += f[j+2]; }
   mR2 /= N; mG2 /= N; mB2 /= N;
   const overall = (mR2 + mG2 + mB2) / 3;
@@ -1362,25 +1385,29 @@ function computeFrameStats(frame, scratchCanvas, downsampleW, downsampleH) {
   const gG = clip(overall / Math.max(mG2, 1e-3));
   const gR = clip(overall / Math.max(mR2, 1e-3));
 
-  const gainedR = new Float32Array(N), gainedG = new Float32Array(N), gainedB = new Float32Array(N);
+  const gainedR = buf.gainedR, gainedG = buf.gainedG, gainedB = buf.gainedB;
   for (let i = 0, j = 0; j < f.length; i++, j += 3) {
     gainedR[i] = Math.min(1, f[j]   * gR);
     gainedG[i] = Math.min(1, f[j+1] * gG);
     gainedB[i] = Math.min(1, f[j+2] * gB);
   }
-  const lo = (arr) => percentile(arr, 0.01);
-  const hi = (arr) => percentile(arr, 0.99);
+  const sortBuf = buf.sorted;
+  const pct = (arr, p) => percentileInPlace(arr, p, sortBuf);
   return {
     mR, mG, mB,
     gains: { R: gR, G: gG, B: gB },
-    los:   { R: lo(gainedR), G: lo(gainedG), B: lo(gainedB) },
-    his:   { R: hi(gainedR), G: hi(gainedG), B: hi(gainedB) },
+    los:   { R: pct(gainedR, 0.01), G: pct(gainedG, 0.01), B: pct(gainedB, 0.01) },
+    his:   { R: pct(gainedR, 0.99), G: pct(gainedG, 0.99), B: pct(gainedB, 0.99) },
   };
 }
 
-function percentile(arr, p) {
-  const sorted = Float32Array.from(arr).sort();
-  return sorted[Math.floor(p * (sorted.length - 1))];
+function percentileInPlace(src, p, sortBuf) {
+  // Copy into the reusable sort buffer, sort, return the percentile.
+  // sortBuf is at least src.length long (allocated once per resolution).
+  sortBuf.set(src);
+  const view = sortBuf.subarray(0, src.length);
+  view.sort();
+  return view[Math.floor(p * (src.length - 1))];
 }
 
 function ema(prev, curr, alpha) { return alpha * curr + (1 - alpha) * prev; }
@@ -1667,7 +1694,9 @@ async function runPipeline() {
   // Each in-flight VideoFrame is ~w*h*4 bytes (RGBA) on the GPU/heap.
   // Budget ~200 MB total → derive QMAX from frame size. Clamp to [4, 30].
   const frameBytes = w * h * 4;
-  const QMAX = Math.max(4, Math.min(30, Math.floor(200 * 1024 * 1024 / frameBytes)));
+  // Tighter budget at 4K — Samsung Internet's tab cap forces conservative
+  // queue depth even though our backpressure is now precise.
+  const QMAX = Math.max(2, Math.min(30, Math.floor(120 * 1024 * 1024 / frameBytes)));
   // Source chunk size: smaller for high-res so each appendBuffer doesn't dump
   // a long burst of samples into the decoder.
   const CHUNK = (frameBytes > 16 * 1024 * 1024) ? 1 * 1024 * 1024
@@ -1676,6 +1705,12 @@ async function runPipeline() {
   log('backpressure', { QMAX, chunkKB: CHUNK / 1024, frameMB: (frameBytes / 1024 / 1024).toFixed(1) });
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
   let offset = 0;
+  // Periodic drain — every N frames, fully drain the pipeline so JS GC has
+  // a chance to reclaim per-frame garbage (typed arrays, ImageData, codec
+  // metadata). Mirrors Dive+'s batch pattern (vector<cv::Mat> processed and
+  // released per batch).
+  let lastDrainAtFrame = 0;
+  const DRAIN_EVERY = 50;
   while (offset < sourceFile.size) {
     // Gate on OWN counters — decoder/encoder.decodeQueueSize is unreliable on
     // Samsung Internet. The own-counter values are decremented in the
@@ -1683,6 +1718,15 @@ async function runPipeline() {
     // loop, so this gate is precise.
     while (encoderInflight > QMAX || decoderInflight > QMAX) {
       await sleep(40);
+    }
+    // Periodic drain to let GC catch up
+    if (frameIdx - lastDrainAtFrame >= DRAIN_EVERY) {
+      while (encoderInflight > 0 || decoderInflight > 0) {
+        await sleep(40);
+      }
+      lastDrainAtFrame = frameIdx;
+      // Yield long enough for an idle GC pass
+      await sleep(80);
     }
     const slice = sourceFile.slice(offset, Math.min(offset + CHUNK, sourceFile.size));
     const ab = await slice.arrayBuffer();
