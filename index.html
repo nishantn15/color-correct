@@ -1206,13 +1206,19 @@ void main() {
   vec3 orig = texture(u_frame, v_uv).rgb;
   vec3 rgb = orig;
 
+  // Ancuti red recovery — exact formula uses per-pixel G as the cross-channel proxy
+  //   R' = R + α · (meanG − meanR) · (1 − R) · G
+  // Earlier we used u_meanG in place of rgb.g (a global proxy). Per-pixel rgb.g
+  // restores the original Ancuti behaviour: pixels with bright greens (real scene
+  // content) get more red recovery; pixels in deep shadow get less.
   if (u_redAlpha > 0.0) {
     float coef = u_redAlpha * (u_meanG - u_meanR);
-    if (coef > 0.0) rgb.r = clamp(rgb.r + coef * (1.0 - rgb.r) * u_meanG, 0.0, 1.0);
+    if (coef > 0.0) rgb.r = clamp(rgb.r + coef * (1.0 - rgb.r) * rgb.g, 0.0, 1.0);
   }
+  // Symmetric blue recovery in green-water conditions, also per-pixel weighted
   if (u_meanB < u_meanG * 0.7) {
     float coef = 0.4 * (u_meanG - u_meanB);
-    if (coef > 0.0) rgb.b = clamp(rgb.b + coef * (1.0 - rgb.b) * u_meanG, 0.0, 1.0);
+    if (coef > 0.0) rgb.b = clamp(rgb.b + coef * (1.0 - rgb.b) * rgb.g, 0.0, 1.0);
   }
 
   rgb.r = texture(u_lutR, vec2(rgb.r, 0.5)).r;
@@ -1408,14 +1414,21 @@ async function runPipeline() {
     ? { codec: 'avc', width: w, height: h }
     : { codec: 'hevc', width: w, height: h };
 
-  // ---- Output target: stream to disk via File System Access API when available
-  // (no in-memory ArrayBufferTarget cap), else fall back to in-memory blob.
-  // Streaming output uses fastStart=false (moov-at-end) instead of in-memory faststart;
-  // mp4-muxer 4.x writes the moov header at finalize via a position-based seek+write.
-  let writable = null;
+  // ---- Output target: three-tier strategy
+  //   1. showSaveFilePicker + createWritable        (Chrome, Edge — user-picked file, true streaming)
+  //   2. OPFS (navigator.storage)                   (Samsung Internet, Safari 17+, anywhere FSA OPFS works)
+  //   3. ArrayBufferTarget                          (last resort, all-in-RAM)
+  //
+  // Tiers 1 and 2 use mp4-muxer FileSystemWritableFileStreamTarget so output
+  // bytes flow straight to a disk-backed file — heap stays flat regardless of
+  // clip length. Tier 3 holds entire output in RAM (~25 Mbps × duration).
+  let writable = null;          // FileSystemWritableFileStream (tier 1 or 2)
+  let opfsHandle = null;        // OPFS file handle (tier 2)
   let useStream = false;
   const stem = sourceFile.name.replace(/\.[^.]+$/, '');
   const outName = `${stem}_uw_s${parseInt($('strength').value, 10)}_${codec}.mp4`;
+
+  // Tier 1: user-picked file via showSaveFilePicker
   if (window.showSaveFilePicker) {
     try {
       const fh = await window.showSaveFilePicker({
@@ -1424,29 +1437,40 @@ async function runPipeline() {
       });
       writable = await fh.createWritable();
       useStream = true;
-      log('streaming output to', fh.name);
+      log('output: streaming to picked file', fh.name);
     } catch (e) {
-      // Samsung Internet allows showSaveFilePicker but restricts createWritable.
-      // Likely fall-through cases: user cancelled (AbortError), or platform refused (NotAllowedError).
+      // AbortError = user cancelled the picker.
+      // NotAllowedError = Samsung Internet refusing createWritable.
       const reason = e.name === 'AbortError' ? 'cancelled' : (e.message || 'denied');
-      log('save picker:', reason, '— using in-memory output');
+      log('save picker:', reason);
     }
-  } else {
-    log('FileSystemAccess unavailable — using in-memory output');
   }
 
-  // ---- In-memory budget warning
-  // Estimate output size from source duration × target bitrate.
-  // Tab usually OOMs around 1.5–2 GB heap on Samsung Internet 4K.
+  // Tier 2: OPFS — origin-private file system. Available on Samsung Internet,
+  // Safari 17+, etc. Doesn't require user gesture or sandboxed picker permission.
+  if (!useStream && navigator.storage && navigator.storage.getDirectory) {
+    try {
+      const root = await navigator.storage.getDirectory();
+      // Use a stable per-origin file name; overwrite each run.
+      opfsHandle = await root.getFileHandle('color-correct-output.mp4', { create: true });
+      writable = await opfsHandle.createWritable();
+      useStream = true;
+      log('output: streaming to OPFS (download link will appear when done)');
+    } catch (e) {
+      log('OPFS unavailable:', e.message || e.name);
+    }
+  }
+
+  if (!useStream) log('output: in-memory ArrayBufferTarget (size-limited)');
+
+  // ---- In-memory budget warning when no streaming target was acquired
   const targetBps = (codec === 'avc') ? 25_000_000 : 15_000_000;
   const estOutMB = (durSec * targetBps / 8) / 1024 / 1024;
   if (!useStream && estOutMB > 250) {
     const ok = confirm(
-      'Streaming output is unavailable; the entire ~' + estOutMB.toFixed(0) +
+      'No streaming output target available; the entire ~' + estOutMB.toFixed(0) +
       ' MB output will be held in browser memory and may crash on long clips.\n\n' +
-      'Consider: open this page in desktop Chrome (better File System Access support), ' +
-      'or trim the source clip first.\n\n' +
-      'Continue anyway?'
+      'Continue anyway? (Cancel and try desktop Chrome for full File System Access support.)'
     );
     if (!ok) {
       $('go').disabled = false;
@@ -1678,22 +1702,35 @@ async function runPipeline() {
 
   muxer.finalize();
   const dl = $('dl');
-  let sizeMB = 0;
   if (useStream && writable) {
-    // Output already streamed to disk; close the writable to flush.
     await writable.close();
-    sizeMB = NaN;
+  }
+
+  if (useStream && opfsHandle) {
+    // Tier 2: stream went to OPFS. Read the file (disk-backed, doesn't materialize
+    // in heap) and offer it as a download URL.
+    const opfsFile = await opfsHandle.getFile();
+    const url = URL.createObjectURL(opfsFile);
+    const sizeMB = opfsFile.size / 1024 / 1024;
+    dl.href = url;
+    dl.download = outName;
+    dl.textContent = `Download .mp4 · ${sizeMB.toFixed(1)} MB`;
+    setStatus('· done · ' + sizeMB.toFixed(1) + ' MB (in OPFS)', 'good');
+    log('done', { mode: 'opfs', sizeMB: sizeMB.toFixed(1), durSec: ((performance.now() - startTime) / 1000).toFixed(1) });
+  } else if (useStream) {
+    // Tier 1: stream went straight to user-picked file; nothing to download.
     dl.href = '#';
     dl.removeAttribute('download');
     dl.textContent = `Saved to ${outName}`;
     setStatus('· done · saved to disk', 'good');
     log('done', { mode: 'stream', file: outName, durSec: ((performance.now() - startTime) / 1000).toFixed(1) });
   } else {
+    // Tier 3: in-memory.
     const ab = (muxer.target && muxer.target.buffer);
     if (!ab || !ab.byteLength) throw new Error('muxer produced no output');
     const blob = new Blob([ab], { type: 'video/mp4' });
     const url = URL.createObjectURL(blob);
-    sizeMB = blob.size / 1024 / 1024;
+    const sizeMB = blob.size / 1024 / 1024;
     dl.href = url;
     dl.download = outName;
     dl.textContent = 'Download .mp4';
