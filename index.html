@@ -1407,10 +1407,40 @@ async function runPipeline() {
   const muxerCfg = (codec === 'avc')
     ? { codec: 'avc', width: w, height: h }
     : { codec: 'hevc', width: w, height: h };
+
+  // ---- Output target: stream to disk via File System Access API when available
+  // (no in-memory ArrayBufferTarget cap), else fall back to in-memory blob.
+  // Streaming output uses fastStart=false (moov-at-end) instead of in-memory faststart;
+  // mp4-muxer 4.x writes the moov header at finalize via a position-based seek+write.
+  let writable = null;
+  let useStream = false;
+  const stem = sourceFile.name.replace(/\.[^.]+$/, '');
+  const outName = `${stem}_uw_s${parseInt($('strength').value, 10)}_${codec}.mp4`;
+  if (window.showSaveFilePicker) {
+    try {
+      const fh = await window.showSaveFilePicker({
+        suggestedName: outName,
+        types: [{ description: 'MP4 video', accept: { 'video/mp4': ['.mp4'] } }],
+      });
+      writable = await fh.createWritable();
+      useStream = true;
+      log('streaming output to', fh.name);
+    } catch (e) {
+      // user cancelled or picker not granted — fall through
+      log('save picker:', e.message || 'cancelled — using in-memory output');
+    }
+  } else {
+    log('FileSystemAccess unavailable — using in-memory output');
+  }
+
+  const target = useStream
+    ? new Mp4Muxer.FileSystemWritableFileStreamTarget(writable)
+    : new Mp4Muxer.ArrayBufferTarget();
+
   const muxerOpts = {
-    target: new Mp4Muxer.ArrayBufferTarget(),
+    target,
     video: muxerCfg,
-    fastStart: 'in-memory',
+    fastStart: useStream ? false : 'in-memory',
     firstTimestampBehavior: 'offset',
   };
   let muxAudio = false;
@@ -1520,8 +1550,12 @@ async function runPipeline() {
           const procFps = frameIdx / elapsed;
           const eta = (totalFrames - frameIdx) / Math.max(procFps, 0.1);
           $('progress-bar').style.width = (frameIdx / totalFrames * 100) + '%';
-          $('prog-l').textContent = `${frameIdx} / ${totalFrames} frames`;
-          $('prog-r').textContent = `${procFps.toFixed(1)} fps · ETA ${eta.toFixed(0)}s`;
+          $('prog-l').textContent = `${frameIdx} / ${totalFrames} · q ${decoder.decodeQueueSize}/${encoder.encodeQueueSize}`;
+          let memTxt = '';
+          if (performance.memory && performance.memory.usedJSHeapSize) {
+            memTxt = ` · ${(performance.memory.usedJSHeapSize / 1024 / 1024).toFixed(0)}MB`;
+          }
+          $('prog-r').textContent = `${procFps.toFixed(1)} fps · ETA ${eta.toFixed(0)}s${memTxt}`;
         }
       } catch (e) {
         log('frame error', e.message);
@@ -1581,47 +1615,63 @@ async function runPipeline() {
   };
 
   log('reading source file…');
-  const reader = new FileReader();
+  // Backpressure: pause source pumping when codec queues fill up.
+  // Each in-flight VideoFrame is ~w*h*4 bytes (RGBA) on the GPU/heap.
+  // Budget ~200 MB total → derive QMAX from frame size. Clamp to [4, 30].
+  const frameBytes = w * h * 4;
+  const QMAX = Math.max(4, Math.min(30, Math.floor(200 * 1024 * 1024 / frameBytes)));
+  // Source chunk size: smaller for high-res so each appendBuffer doesn't dump
+  // a long burst of samples into the decoder.
+  const CHUNK = (frameBytes > 16 * 1024 * 1024) ? 1 * 1024 * 1024
+              : (frameBytes >  4 * 1024 * 1024) ? 4 * 1024 * 1024
+              : 8 * 1024 * 1024;
+  log('backpressure', { QMAX, chunkKB: CHUNK / 1024, frameMB: (frameBytes / 1024 / 1024).toFixed(1) });
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
   let offset = 0;
-  const CHUNK = 8 * 1024 * 1024;
-  await new Promise((resolve, reject) => {
-    function readNext() {
-      if (offset >= sourceFile.size) {
-        file.flush();
-        resolve();
-        return;
-      }
-      const slice = sourceFile.slice(offset, offset + CHUNK);
-      reader.onerror = reject;
-      reader.onload = (e) => {
-        const ab = e.target.result;
-        ab.fileStart = offset;
-        file.appendBuffer(ab);
-        offset += CHUNK;
-        setTimeout(readNext, 0);
-      };
-      reader.readAsArrayBuffer(slice);
+  while (offset < sourceFile.size) {
+    while (encoder.encodeQueueSize > QMAX || decoder.decodeQueueSize > QMAX) {
+      await sleep(40);
     }
-    readNext();
-  });
+    const slice = sourceFile.slice(offset, Math.min(offset + CHUNK, sourceFile.size));
+    const ab = await slice.arrayBuffer();
+    ab.fileStart = offset;
+    file.appendBuffer(ab);
+    offset += ab.byteLength;
+    // Yield to UI/codec threads
+    await sleep(0);
+  }
+  file.flush();
 
   log('source pumped; flushing decoder');
   await decoder.flush();
   await encoder.flush();
   log('decoder + encoder flushed');
 
-  const ret = muxer.finalize();
-  const ab = ret && ret.byteLength ? ret : (muxer.target && muxer.target.buffer);
-  if (!ab || !ab.byteLength) throw new Error('muxer produced no output');
-  const blob = new Blob([ab], { type: 'video/mp4' });
-  const url = URL.createObjectURL(blob);
+  muxer.finalize();
   const dl = $('dl');
-  dl.href = url;
-  const stem = sourceFile.name.replace(/\.[^.]+$/, '');
-  dl.download = `${stem}_uw_s${parseInt($('strength').value, 10)}_${codec}.mp4`;
+  let sizeMB = 0;
+  if (useStream && writable) {
+    // Output already streamed to disk; close the writable to flush.
+    await writable.close();
+    sizeMB = NaN;
+    dl.href = '#';
+    dl.removeAttribute('download');
+    dl.textContent = `Saved to ${outName}`;
+    setStatus('· done · saved to disk', 'good');
+    log('done', { mode: 'stream', file: outName, durSec: ((performance.now() - startTime) / 1000).toFixed(1) });
+  } else {
+    const ab = (muxer.target && muxer.target.buffer);
+    if (!ab || !ab.byteLength) throw new Error('muxer produced no output');
+    const blob = new Blob([ab], { type: 'video/mp4' });
+    const url = URL.createObjectURL(blob);
+    sizeMB = blob.size / 1024 / 1024;
+    dl.href = url;
+    dl.download = outName;
+    dl.textContent = 'Download .mp4';
+    setStatus('· done · ' + sizeMB.toFixed(1) + ' MB', 'good');
+    log('done', { mode: 'in-memory', sizeMB: sizeMB.toFixed(1), durSec: ((performance.now() - startTime) / 1000).toFixed(1) });
+  }
   $('result').classList.add('on');
-  setStatus('· done · ' + (blob.size / 1024 / 1024).toFixed(1) + ' MB', 'good');
-  log('done', { sizeMB: (blob.size / 1024 / 1024).toFixed(1), durSec: ((performance.now() - startTime) / 1000).toFixed(1) });
   $('go').disabled = false;
 }
 
