@@ -1414,63 +1414,45 @@ async function runPipeline() {
     ? { codec: 'avc', width: w, height: h }
     : { codec: 'hevc', width: w, height: h };
 
-  // ---- Output target: three-tier strategy
-  //   1. showSaveFilePicker + createWritable        (Chrome, Edge — user-picked file, true streaming)
-  //   2. OPFS (navigator.storage)                   (Samsung Internet, Safari 17+, anywhere FSA OPFS works)
-  //   3. ArrayBufferTarget                          (last resort, all-in-RAM)
+  // ---- Output target: OPFS streaming, with in-memory fallback.
   //
-  // Tiers 1 and 2 use mp4-muxer FileSystemWritableFileStreamTarget so output
-  // bytes flow straight to a disk-backed file — heap stays flat regardless of
-  // clip length. Tier 3 holds entire output in RAM (~25 Mbps × duration).
-  let writable = null;          // FileSystemWritableFileStream (tier 1 or 2)
-  let opfsHandle = null;        // OPFS file handle (tier 2)
+  // Why no showSaveFilePicker? On Samsung Internet, the picker resolves a
+  // FileSystemFileHandle but createWritable() throws NotAllowedError — leaving
+  // an empty 0-byte placeholder at the picked location and confusing users.
+  // OPFS (origin-private file system) works there and on Safari 17+ without
+  // permission prompts. Output bytes stream straight to a disk-backed file in
+  // browser-private storage; we then offer a Download button backed by that
+  // file when processing finishes. Heap stays flat regardless of clip length.
+  let writable = null;
+  let opfsHandle = null;
   let useStream = false;
   const stem = sourceFile.name.replace(/\.[^.]+$/, '');
   const outName = `${stem}_uw_s${parseInt($('strength').value, 10)}_${codec}.mp4`;
 
-  // Tier 1: user-picked file via showSaveFilePicker
-  if (window.showSaveFilePicker) {
-    try {
-      const fh = await window.showSaveFilePicker({
-        suggestedName: outName,
-        types: [{ description: 'MP4 video', accept: { 'video/mp4': ['.mp4'] } }],
-      });
-      writable = await fh.createWritable();
-      useStream = true;
-      log('output: streaming to picked file', fh.name);
-    } catch (e) {
-      // AbortError = user cancelled the picker.
-      // NotAllowedError = Samsung Internet refusing createWritable.
-      const reason = e.name === 'AbortError' ? 'cancelled' : (e.message || 'denied');
-      log('save picker:', reason);
-    }
-  }
-
-  // Tier 2: OPFS — origin-private file system. Available on Samsung Internet,
-  // Safari 17+, etc. Doesn't require user gesture or sandboxed picker permission.
-  if (!useStream && navigator.storage && navigator.storage.getDirectory) {
+  // Tier 1: OPFS streaming
+  if (navigator.storage && navigator.storage.getDirectory) {
     try {
       const root = await navigator.storage.getDirectory();
-      // Use a stable per-origin file name; overwrite each run.
+      // Stable file name; overwritten each run to avoid quota bloat
       opfsHandle = await root.getFileHandle('color-correct-output.mp4', { create: true });
       writable = await opfsHandle.createWritable();
       useStream = true;
-      log('output: streaming to OPFS (download link will appear when done)');
+      log('output: streaming to OPFS');
     } catch (e) {
       log('OPFS unavailable:', e.message || e.name);
     }
   }
 
-  if (!useStream) log('output: in-memory ArrayBufferTarget (size-limited)');
+  if (!useStream) log('output: in-memory (no streaming target — size-limited)');
 
-  // ---- In-memory budget warning when no streaming target was acquired
+  // Tier 2: in-memory fallback. Warn when estimated output is large.
   const targetBps = (codec === 'avc') ? 25_000_000 : 15_000_000;
   const estOutMB = (durSec * targetBps / 8) / 1024 / 1024;
   if (!useStream && estOutMB > 250) {
     const ok = confirm(
-      'No streaming output target available; the entire ~' + estOutMB.toFixed(0) +
+      'OPFS streaming is unavailable in this browser; the entire ~' + estOutMB.toFixed(0) +
       ' MB output will be held in browser memory and may crash on long clips.\n\n' +
-      'Continue anyway? (Cancel and try desktop Chrome for full File System Access support.)'
+      'Continue anyway?'
     );
     if (!ok) {
       $('go').disabled = false;
