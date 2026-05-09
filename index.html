@@ -1426,11 +1426,33 @@ async function runPipeline() {
       useStream = true;
       log('streaming output to', fh.name);
     } catch (e) {
-      // user cancelled or picker not granted — fall through
-      log('save picker:', e.message || 'cancelled — using in-memory output');
+      // Samsung Internet allows showSaveFilePicker but restricts createWritable.
+      // Likely fall-through cases: user cancelled (AbortError), or platform refused (NotAllowedError).
+      const reason = e.name === 'AbortError' ? 'cancelled' : (e.message || 'denied');
+      log('save picker:', reason, '— using in-memory output');
     }
   } else {
     log('FileSystemAccess unavailable — using in-memory output');
+  }
+
+  // ---- In-memory budget warning
+  // Estimate output size from source duration × target bitrate.
+  // Tab usually OOMs around 1.5–2 GB heap on Samsung Internet 4K.
+  const targetBps = (codec === 'avc') ? 25_000_000 : 15_000_000;
+  const estOutMB = (durSec * targetBps / 8) / 1024 / 1024;
+  if (!useStream && estOutMB > 250) {
+    const ok = confirm(
+      'Streaming output is unavailable; the entire ~' + estOutMB.toFixed(0) +
+      ' MB output will be held in browser memory and may crash on long clips.\n\n' +
+      'Consider: open this page in desktop Chrome (better File System Access support), ' +
+      'or trim the source clip first.\n\n' +
+      'Continue anyway?'
+    );
+    if (!ok) {
+      $('go').disabled = false;
+      setStatus('— cancelled', '');
+      return;
+    }
   }
 
   const target = useStream
@@ -1611,6 +1633,13 @@ async function runPipeline() {
           if (muxAudio) { log('audio mux failed:', e.message); muxAudio = false; }
         }
       }
+    }
+    // CRITICAL: release consumed sample data so mp4box doesn't retain the
+    // entire source in memory. Without this, a 158 MB 4K source pegs the
+    // heap regardless of how fast we drain the codecs.
+    if (samples.length > 0) {
+      const last = samples[samples.length - 1];
+      file.releaseUsedSamples(id, last.number + 1);
     }
   };
 
