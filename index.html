@@ -1,0 +1,911 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+<title>scuba-color — underwater color correction</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  :root {
+    --bg-0: #050a13; --bg-1: #0a1320; --bg-2: #11203a; --case: #0e1722;
+    --ink-0: #e9f1ff; --ink-1: #c8d6ee; --ink-2: #8aa0c1; --ink-3: #56698a;
+    --accent: #34d2c8; --lume: #d8ff5a; --lume-glow: rgba(216,255,90,.55);
+    --good: #4ad28a; --warn: #ffb444; --bad: #ff5c52;
+  }
+  html, body {
+    margin: 0; padding: 0;
+    background: radial-gradient(ellipse at 50% -10%, #14304f 0%, var(--bg-0) 55%, #02060c 100%);
+    color: var(--ink-0);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, "Helvetica Neue", Arial, sans-serif;
+    min-height: 100vh;
+  }
+  body { padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); max-width: 760px; margin: 0 auto; }
+  header { display: flex; align-items: center; gap: 10px; padding: 14px 16px 10px; border-bottom: 1px solid rgba(255,255,255,.06); }
+  .logo { width: 34px; height: 34px; border-radius: 9px; background: radial-gradient(circle at 30% 25%, #2c5e7a 0%, #0c1828 65%); display: grid; place-items: center; color: var(--lume); font-weight: 800; font-size: 15px; text-shadow: 0 0 6px var(--lume-glow); box-shadow: inset 0 0 0 1px rgba(255,255,255,.12); }
+  h1 { font-size: 16px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; margin: 0; }
+  .sub { font-size: 11px; color: var(--ink-2); letter-spacing: .08em; margin-top: 2px; }
+  main { padding: 16px; }
+  section { margin-bottom: 18px; }
+  section h2 { font-size: 12px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; color: var(--ink-2); margin: 0 0 10px; }
+  .card { background: var(--bg-1); border: 1px solid rgba(255,255,255,.06); border-radius: 12px; padding: 14px 16px; }
+
+  /* drop zone */
+  .drop {
+    border: 2px dashed rgba(216,255,90,.28);
+    border-radius: 12px;
+    padding: 28px 16px;
+    text-align: center;
+    color: var(--ink-1);
+    cursor: pointer;
+    transition: background .2s, border-color .2s;
+  }
+  .drop:hover, .drop.over { background: rgba(216,255,90,.06); border-color: rgba(216,255,90,.55); }
+  .drop b { color: var(--lume); }
+  input[type=file] { display: none; }
+
+  /* sliders */
+  .row { display: flex; align-items: center; gap: 10px; margin: 10px 0; }
+  .row label { flex: 0 0 110px; font-size: 12px; color: var(--ink-2); text-transform: uppercase; letter-spacing: .08em; }
+  .row input[type=range] { flex: 1; accent-color: var(--lume); }
+  .row .val { flex: 0 0 50px; text-align: right; font-variant-numeric: tabular-nums; color: var(--ink-1); font-size: 14px; }
+  .row .seg { display: flex; gap: 4px; }
+  .row .seg button { background: var(--case); color: var(--ink-1); border: 1px solid rgba(255,255,255,.1); border-radius: 6px; padding: 6px 12px; cursor: pointer; font-size: 12px; font-weight: 600; }
+  .row .seg button.on { background: rgba(216,255,90,.12); color: var(--lume); border-color: rgba(216,255,90,.55); }
+
+  /* main button */
+  button.go {
+    width: 100%; padding: 14px;
+    font-size: 15px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase;
+    color: var(--bg-0); background: var(--lume);
+    border: none; border-radius: 10px;
+    cursor: pointer;
+    box-shadow: 0 4px 14px rgba(216,255,90,.25);
+  }
+  button.go:disabled { opacity: .4; cursor: not-allowed; box-shadow: none; }
+
+  /* progress */
+  .progress {
+    height: 14px; border-radius: 999px; background: var(--case);
+    overflow: hidden; position: relative; margin: 10px 0;
+  }
+  .progress > div {
+    height: 100%; width: 0;
+    background: linear-gradient(90deg, var(--accent), var(--lume));
+    transition: width .15s ease;
+  }
+  .progress-text {
+    font-size: 12px; color: var(--ink-2); display: flex; justify-content: space-between;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* result */
+  .result { display: none; }
+  .result.on { display: block; }
+  .result a {
+    display: inline-block; margin-top: 10px;
+    padding: 10px 18px; border-radius: 8px;
+    background: rgba(74,210,138,.16); color: var(--good);
+    border: 1px solid rgba(74,210,138,.45);
+    text-decoration: none; font-weight: 700; font-size: 14px;
+  }
+  .result a:hover { background: rgba(74,210,138,.26); }
+
+  /* meta */
+  .meta { font-size: 12px; color: var(--ink-2); }
+  .meta b { color: var(--ink-1); font-weight: 600; }
+  .meta-grid { display: grid; grid-template-columns: max-content 1fr; gap: 6px 12px; margin: 8px 0; font-size: 12px; }
+
+  /* logs */
+  pre { margin: 8px 0 0; max-height: 240px; overflow: auto; padding: 10px; border-radius: 6px; background: var(--case); border: 1px solid rgba(255,255,255,.06); font-size: 11px; font-family: ui-monospace, "SF Mono", Menlo, monospace; color: var(--ink-1); white-space: pre-wrap; }
+  details summary { cursor: pointer; color: var(--ink-2); font-size: 12px; padding: 6px 0; }
+
+  .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+  .pill-ok   { background: rgba(74,210,138,.14); color: var(--good); border: 1px solid rgba(74,210,138,.3); }
+  .pill-warn { background: rgba(255,180,68,.14); color: var(--warn); border: 1px solid rgba(255,180,68,.3); }
+  .pill-bad  { background: rgba(255,92,82,.14);  color: var(--bad);  border: 1px solid rgba(255,92,82,.3); }
+
+  footer { text-align: center; font-size: 11px; color: var(--ink-3); padding: 16px; border-top: 1px solid rgba(255,255,255,.04); margin-top: 28px; }
+
+  .hidden { display: none !important; }
+</style>
+
+<!-- mp4box.js for demuxing the input MP4 -->
+<script src="https://cdn.jsdelivr.net/npm/mp4box@0.5.4/dist/mp4box.all.min.js"></script>
+<!-- mp4-muxer for muxing the output MP4 -->
+<!-- Pinned to last 4.x for now; 5.x's strict colorSpace check trips Chrome encoders that don't emit it. -->
+<script src="https://cdn.jsdelivr.net/npm/mp4-muxer@4.3.3/build/mp4-muxer.min.js"></script>
+</head>
+<body>
+
+<header>
+  <div class="logo">SC</div>
+  <div>
+    <h1>scuba-color</h1>
+    <div class="sub">underwater color correction · webcodecs · webgl2</div>
+  </div>
+</header>
+
+<main>
+
+<section>
+  <h2>1. Pick a video</h2>
+  <div class="card">
+    <label class="drop" id="drop">
+      <input type="file" id="file" accept="video/mp4,video/x-m4v,video/*" />
+      <div><b>Tap to choose</b> or drop a .mp4 here</div>
+      <div class="meta" style="margin-top:6px">runs entirely on your phone — nothing uploaded</div>
+    </label>
+    <div id="src-info" class="hidden">
+      <div class="meta-grid">
+        <div>file</div>            <div id="i-name">—</div>
+        <div>size</div>            <div id="i-size">—</div>
+        <div>video</div>           <div id="i-video">—</div>
+        <div>audio</div>           <div id="i-audio">—</div>
+        <div>duration</div>        <div id="i-duration">—</div>
+      </div>
+      <div id="capability" class="meta"></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>2. Settings</h2>
+  <div class="card">
+    <div class="row">
+      <label>strength</label>
+      <input type="range" id="strength" min="0" max="100" step="1" value="60" />
+      <div class="val"><span id="strength-v">60</span></div>
+    </div>
+    <div class="row">
+      <label>red α</label>
+      <input type="range" id="redalpha" min="0" max="200" step="5" value="100" />
+      <div class="val"><span id="redalpha-v">1.00</span></div>
+    </div>
+    <div class="row">
+      <label>codec</label>
+      <div class="seg" id="codec-seg">
+        <button class="on" data-v="avc">H.264</button>
+        <button data-v="hevc">HEVC</button>
+      </div>
+      <div style="flex:1"></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>3. Process</h2>
+  <div class="card">
+    <button class="go" id="go" disabled>Start</button>
+    <div id="progress-wrap" class="hidden">
+      <div class="progress"><div id="progress-bar"></div></div>
+      <div class="progress-text">
+        <span id="prog-l">—</span>
+        <span id="prog-r">—</span>
+      </div>
+    </div>
+    <div class="result" id="result">
+      <div class="meta"><b>Output ready.</b></div>
+      <a id="dl" download>Download .mp4</a>
+    </div>
+  </div>
+</section>
+
+<section>
+  <details>
+    <summary>Diagnostics</summary>
+    <pre id="log"></pre>
+  </details>
+</section>
+
+</main>
+
+<footer>
+  scuba-color — single-file PWA. Runs in your browser. No uploads.
+</footer>
+
+<script>
+'use strict';
+
+// ---------- log ----------
+const logEl = document.getElementById('log');
+function log(...args) {
+  const line = args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' ');
+  logEl.textContent += line + '\n';
+  logEl.scrollTop = logEl.scrollHeight;
+  console.log(...args);
+}
+
+// ---------- DOM helpers ----------
+const $ = (id) => document.getElementById(id);
+
+// ---------- settings UI ----------
+let codec = 'avc';
+
+$('strength').addEventListener('input', e => $('strength-v').textContent = e.target.value);
+$('redalpha').addEventListener('input', e => $('redalpha-v').textContent = (e.target.value/100).toFixed(2));
+document.querySelectorAll('#codec-seg button').forEach(b => {
+  b.addEventListener('click', () => {
+    document.querySelectorAll('#codec-seg button').forEach(x => x.classList.remove('on'));
+    b.classList.add('on');
+    codec = b.dataset.v;
+  });
+});
+
+// ---------- file picker ----------
+let sourceFile = null;
+let sourceInfo = null;          // mp4box file info
+let videoTrack = null;
+let audioTrack = null;
+let videoCodecString = null;    // for VideoDecoder.configure
+
+const drop = $('drop');
+const fileInput = $('file');
+
+['dragenter','dragover'].forEach(ev =>
+  drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('over'); }));
+['dragleave','drop'].forEach(ev =>
+  drop.addEventListener(ev, e => drop.classList.remove('over')));
+drop.addEventListener('drop', e => {
+  e.preventDefault();
+  const f = e.dataTransfer.files[0];
+  if (f) handleFile(f);
+});
+fileInput.addEventListener('change', e => {
+  const f = e.target.files[0];
+  if (f) handleFile(f);
+});
+
+async function handleFile(file) {
+  sourceFile = file;
+  $('i-name').textContent = file.name;
+  $('i-size').textContent = (file.size / 1024 / 1024).toFixed(1) + ' MB';
+  $('src-info').classList.remove('hidden');
+  log('opening', file.name);
+
+  try {
+    const info = await demuxInfo(file);
+    sourceInfo = info;
+    log('info', info);
+    const vt = info.videoTracks[0];
+    videoTrack = vt;
+    audioTrack = info.audioTracks[0] || null;
+    videoCodecString = vt.codec;
+
+    $('i-video').innerHTML = `${vt.codec} • ${vt.video.width}×${vt.video.height} • ${vt.nb_samples} frames`;
+    $('i-audio').textContent = audioTrack ? `${audioTrack.codec} • ${audioTrack.audio.channel_count}ch ${audioTrack.audio.sample_rate}Hz` : '(none)';
+    $('i-duration').textContent = (vt.duration / vt.timescale).toFixed(2) + ' s';
+
+    // capability check
+    const dec = await checkDecode(vt);
+    const enc = await checkEncode(vt.video.width, vt.video.height, codec);
+    $('capability').innerHTML = capabilityPill(dec, enc);
+
+    $('go').disabled = !(dec.supported && enc.supported);
+  } catch (e) {
+    log('error', e.message);
+    $('i-video').textContent = 'failed: ' + e.message;
+  }
+}
+
+// ---------- demux: mp4box.js ----------
+async function demuxInfo(file) {
+  return new Promise((resolve, reject) => {
+    const mp4 = MP4Box.createFile();
+    mp4.onError = (e) => reject(new Error('mp4box: ' + e));
+    mp4.onReady = (info) => resolve(info);
+
+    // pump file in chunks
+    const chunkSize = 4 * 1024 * 1024;
+    const reader = new FileReader();
+    let offset = 0;
+    function readNext() {
+      if (offset >= file.size) return;
+      const slice = file.slice(offset, offset + chunkSize);
+      reader.onload = (e) => {
+        const ab = e.target.result;
+        ab.fileStart = offset;
+        mp4.appendBuffer(ab);
+        offset += chunkSize;
+        readNext();
+      };
+      reader.readAsArrayBuffer(slice);
+    }
+    readNext();
+  });
+}
+
+// ---------- capability checks ----------
+async function checkDecode(vt) {
+  if (typeof VideoDecoder === 'undefined') return { supported: false, reason: 'no VideoDecoder' };
+  // Try HW first, fall back to no-preference if HW unavailable.
+  for (const accel of ['prefer-hardware', 'no-preference']) {
+    try {
+      const r = await VideoDecoder.isConfigSupported({
+        codec: vt.codec, codedWidth: vt.video.width, codedHeight: vt.video.height,
+        hardwareAcceleration: accel,
+      });
+      if (r.supported) return r;
+    } catch (e) { /* try next */ }
+  }
+  return { supported: false, reason: 'no decoder for ' + vt.codec };
+}
+
+async function checkEncode(w, h, kind) {
+  if (typeof VideoEncoder === 'undefined') return { supported: false, reason: 'no VideoEncoder' };
+  const base = (kind === 'avc')
+    ? { codec: 'avc1.640034', width: w, height: h, bitrate: 25_000_000, framerate: 30, avc: { format: 'avc' } }
+    : { codec: 'hvc1.1.6.L153.B0', width: w, height: h, bitrate: 15_000_000, framerate: 30 };
+  for (const accel of ['prefer-hardware', 'no-preference']) {
+    try {
+      const r = await VideoEncoder.isConfigSupported({ ...base, hardwareAcceleration: accel });
+      if (r.supported) return r;
+    } catch (e) { /* try next */ }
+  }
+  return { supported: false, reason: 'no encoder for ' + base.codec };
+}
+
+function capabilityPill(dec, enc) {
+  let html = '';
+  html += dec.supported
+    ? `<span class="pill pill-ok">decode ✓</span>`
+    : `<span class="pill pill-bad">decode ✕</span>`;
+  html += ' ';
+  html += enc.supported
+    ? `<span class="pill pill-ok">encode ✓</span>`
+    : `<span class="pill pill-bad">encode ✕</span>`;
+  if (dec.supported && enc.supported) {
+    const decHw = dec.config && /hardware/.test(dec.config.hardwareAcceleration || '');
+    const encHw = enc.config && /hardware/.test(enc.config.hardwareAcceleration || '');
+    html += ' ';
+    html += `<span class="pill ${(decHw && encHw) ? 'pill-ok' : 'pill-warn'}">${decHw ? 'HW dec' : 'SW dec'} · ${encHw ? 'HW enc' : 'SW enc'}</span>`;
+  }
+  return html;
+}
+
+// ============================================================
+// PROCESSING PIPELINE
+// ============================================================
+
+// ---------- WebGL2 shader (Ancuti red recovery + per-channel LUT + strength) ----------
+const VS = `#version 300 es
+in vec2 a_pos;
+out vec2 v_uv;
+void main() {
+  v_uv = a_pos * 0.5 + 0.5;
+  v_uv.y = 1.0 - v_uv.y;     // flip Y so video frame is right side up
+  gl_Position = vec4(a_pos, 0.0, 1.0);
+}`;
+
+const FS = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+out vec4 outColor;
+uniform sampler2D u_frame;
+uniform sampler2D u_lutR;     // 256x1
+uniform sampler2D u_lutG;
+uniform sampler2D u_lutB;
+uniform float u_strength;
+uniform float u_redAlpha;
+uniform float u_meanR;
+uniform float u_meanG;
+uniform float u_meanB;
+
+void main() {
+  vec3 orig = texture(u_frame, v_uv).rgb;
+  vec3 rgb = orig;
+
+  // Ancuti red recovery (using mean-G approximation per docs 09 §2.7)
+  if (u_redAlpha > 0.0) {
+    float coef = u_redAlpha * (u_meanG - u_meanR);
+    if (coef > 0.0) rgb.r = clamp(rgb.r + coef * (1.0 - rgb.r) * u_meanG, 0.0, 1.0);
+  }
+  // Optional blue recovery for green water
+  if (u_meanB < u_meanG * 0.7) {
+    float coef = 0.4 * (u_meanG - u_meanB);
+    if (coef > 0.0) rgb.b = clamp(rgb.b + coef * (1.0 - rgb.b) * u_meanG, 0.0, 1.0);
+  }
+
+  // Per-channel LUT (gain × percentile-stretch × s-curve)
+  rgb.r = texture(u_lutR, vec2(rgb.r, 0.5)).r;
+  rgb.g = texture(u_lutG, vec2(rgb.g, 0.5)).r;
+  rgb.b = texture(u_lutB, vec2(rgb.b, 0.5)).r;
+
+  outColor = vec4(mix(orig, rgb, u_strength), 1.0);
+}`;
+
+class GLShader {
+  constructor(canvas, w, h) {
+    this.canvas = canvas;
+    canvas.width = w; canvas.height = h;
+    const gl = canvas.getContext('webgl2', { preserveDrawingBuffer: false, alpha: false });
+    if (!gl) throw new Error('WebGL2 not available');
+    this.gl = gl;
+
+    const vs = this.compile(gl.VERTEX_SHADER, VS);
+    const fs = this.compile(gl.FRAGMENT_SHADER, FS);
+    const prog = gl.createProgram();
+    gl.attachShader(prog, vs); gl.attachShader(prog, fs);
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error('link fail: ' + gl.getProgramInfoLog(prog));
+    this.prog = prog;
+    gl.useProgram(prog);
+
+    // fullscreen quad
+    const vb = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, vb);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+    const loc = gl.getAttribLocation(prog, 'a_pos');
+    gl.enableVertexAttribArray(loc);
+    gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+
+    // textures
+    this.texFrame = this.makeTex(gl.TEXTURE_2D);
+    this.texLutR  = this.makeTex(gl.TEXTURE_2D);
+    this.texLutG  = this.makeTex(gl.TEXTURE_2D);
+    this.texLutB  = this.makeTex(gl.TEXTURE_2D);
+
+    // uniforms
+    gl.uniform1i(gl.getUniformLocation(prog, 'u_frame'), 0);
+    gl.uniform1i(gl.getUniformLocation(prog, 'u_lutR'),  1);
+    gl.uniform1i(gl.getUniformLocation(prog, 'u_lutG'),  2);
+    gl.uniform1i(gl.getUniformLocation(prog, 'u_lutB'),  3);
+
+    this.uS = gl.getUniformLocation(prog, 'u_strength');
+    this.uA = gl.getUniformLocation(prog, 'u_redAlpha');
+    this.uMR = gl.getUniformLocation(prog, 'u_meanR');
+    this.uMG = gl.getUniformLocation(prog, 'u_meanG');
+    this.uMB = gl.getUniformLocation(prog, 'u_meanB');
+
+    gl.viewport(0, 0, w, h);
+  }
+  compile(type, src) {
+    const gl = this.gl;
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src); gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error('compile fail: ' + gl.getShaderInfoLog(s));
+    return s;
+  }
+  makeTex() {
+    const gl = this.gl;
+    const t = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    return t;
+  }
+  uploadLut(tex, u8Array256) {
+    const gl = this.gl;
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE, 256, 1, 0, gl.LUMINANCE, gl.UNSIGNED_BYTE, u8Array256);
+  }
+  draw(videoFrame, params) {
+    const gl = this.gl;
+    // upload frame to unit 0
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this.texFrame);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, videoFrame);
+    // bind luts
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this.texLutR);
+    gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, this.texLutG);
+    gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, this.texLutB);
+    // uniforms
+    gl.uniform1f(this.uS,  params.strength);
+    gl.uniform1f(this.uA,  params.redAlpha);
+    gl.uniform1f(this.uMR, params.meanR);
+    gl.uniform1f(this.uMG, params.meanG);
+    gl.uniform1f(this.uMB, params.meanB);
+    // draw
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  }
+}
+
+// ---------- LUT generation (mirrors uw_enhance.py) ----------
+function buildLuts(gains, los, his, scurve = true, sat = 1.10) {
+  const out = [new Uint8Array(256), new Uint8Array(256), new Uint8Array(256)];
+  for (let c = 0; c < 3; c++) {
+    for (let i = 0; i < 256; i++) {
+      let y = i / 255.0 * gains[c];
+      y = Math.min(1, Math.max(0, y));
+      const denom = Math.max(his[c] - los[c], 1e-3);
+      y = (y - los[c]) / denom;
+      y = Math.min(1, Math.max(0, y));
+      if (scurve) y = 0.5 - 0.5 * Math.cos(Math.PI * y);
+      if (sat > 1.0) {
+        const mid = 0.5;
+        y = y + (sat - 1.0) * 0.15 * (1 - 4 * (y - mid) ** 2);
+        y = Math.min(1, Math.max(0, y));
+      }
+      out[c][i] = Math.round(Math.min(255, Math.max(0, y * 255)));
+    }
+  }
+  return out;     // [B, G, R] for shader; we'll bind R/G/B explicitly
+}
+
+// ---------- frame stats: compute means, gains, stretch bounds on a downsample ----------
+function computeFrameStats(frame, scratchCanvas, downsampleW, downsampleH) {
+  // Draw frame to a small canvas, getImageData, compute stats.
+  const ctx = scratchCanvas.getContext('2d', { willReadFrequently: true });
+  scratchCanvas.width = downsampleW;
+  scratchCanvas.height = downsampleH;
+  ctx.drawImage(frame, 0, 0, downsampleW, downsampleH);
+  const data = ctx.getImageData(0, 0, downsampleW, downsampleH).data;
+  // Means before red comp
+  let sumR=0, sumG=0, sumB=0;
+  const N = downsampleW * downsampleH;
+  for (let i = 0; i < data.length; i += 4) {
+    sumR += data[i]; sumG += data[i+1]; sumB += data[i+2];
+  }
+  const mR = sumR / N / 255;
+  const mG = sumG / N / 255;
+  const mB = sumB / N / 255;
+
+  // Apply red comp + blue comp on the small data, then compute gains and percentile bounds
+  const f = new Float32Array(N * 3);
+  const redCoef = mG > mR ? (mG - mR) : 0;
+  const blueCoef = (mB < mG * 0.7) ? 0.4 * (mG - mB) : 0;
+  for (let i = 0, j = 0; i < data.length; i += 4, j += 3) {
+    let r = data[i] / 255, g = data[i+1] / 255, b = data[i+2] / 255;
+    if (redCoef > 0) r = Math.min(1, r + 1.0 * redCoef * (1 - r) * g);
+    if (blueCoef > 0) b = Math.min(1, b + blueCoef * (1 - b) * g);
+    f[j] = r; f[j+1] = g; f[j+2] = b;
+  }
+  // gray-world gains on red-comped
+  let mR2=0, mG2=0, mB2=0;
+  for (let j = 0; j < f.length; j += 3) { mR2 += f[j]; mG2 += f[j+1]; mB2 += f[j+2]; }
+  mR2 /= N; mG2 /= N; mB2 /= N;
+  const overall = (mR2 + mG2 + mB2) / 3;
+  const clip = (g) => Math.min(3, Math.max(0.5, g));
+  const gains = [
+    clip(overall / Math.max(mB2, 1e-3)),  // index 0 in our float = R, but indices in shader: uniform u_gain doesn't exist; LUTs encode gain. We pass gains in BGR order to match later.
+    clip(overall / Math.max(mG2, 1e-3)),
+    clip(overall / Math.max(mR2, 1e-3)),
+  ];
+  // Wait — our float array f is in RGB order (j=R, j+1=G, j+2=B). Reorder gains to match LUT consumers.
+  // For consistency with uw_enhance.py BGR convention, we'll swap to BGR for the LUTs:
+  const gainsBGR = [gains[2], gains[1], gains[0]];   // gains were stored RGB->R,G,B; need BGR
+  // ... but gains[0] above used mB2 (B) and gains[2] used mR2 (R). So "gains" is actually [B, G, R] already!
+  // Hmm let me redo to be explicit.
+
+  // Cleaner: explicit per-channel
+  const gB = clip(overall / Math.max(mB2, 1e-3));
+  const gG = clip(overall / Math.max(mG2, 1e-3));
+  const gR = clip(overall / Math.max(mR2, 1e-3));
+  const gainsExplicit = { R: gR, G: gG, B: gB };
+
+  // gained-and-clipped channel arrays for percentile
+  const gainedR = new Float32Array(N), gainedG = new Float32Array(N), gainedB = new Float32Array(N);
+  for (let i = 0, j = 0; j < f.length; i++, j += 3) {
+    gainedR[i] = Math.min(1, f[j]   * gR);
+    gainedG[i] = Math.min(1, f[j+1] * gG);
+    gainedB[i] = Math.min(1, f[j+2] * gB);
+  }
+  const lo = (arr) => percentile(arr, 0.01);
+  const hi = (arr) => percentile(arr, 0.99);
+  const losExplicit = { R: lo(gainedR), G: lo(gainedG), B: lo(gainedB) };
+  const hisExplicit = { R: hi(gainedR), G: hi(gainedG), B: hi(gainedB) };
+
+  return { mR, mG, mB, gains: gainsExplicit, los: losExplicit, his: hisExplicit };
+}
+
+function percentile(arr, p) {
+  const sorted = Float32Array.from(arr).sort();
+  const idx = Math.floor(p * (sorted.length - 1));
+  return sorted[idx];
+}
+
+// ---------- EMA ----------
+function ema(prev, curr, alpha) {
+  return alpha * curr + (1 - alpha) * prev;
+}
+
+// ============================================================
+// Main pipeline
+// ============================================================
+
+$('go').addEventListener('click', () => {
+  $('go').disabled = true;
+  $('progress-wrap').classList.remove('hidden');
+  $('result').classList.remove('on');
+  runPipeline().catch(e => {
+    log('FATAL', e.stack || e.message);
+    $('go').disabled = false;
+  });
+});
+
+async function runPipeline() {
+  if (!sourceFile) return;
+  log('starting pipeline');
+
+  const w = videoTrack.video.width;
+  const h = videoTrack.video.height;
+  const durSec = videoTrack.duration / videoTrack.timescale;
+  const totalFrames = videoTrack.nb_samples;
+  const fps = totalFrames / durSec;
+
+  // ---- 1. set up muxer ----
+  // For mp4-muxer 4.x: video config wants {codec, width, height}.
+  // For mp4-muxer 5.x: same fields + reads colorSpace from chunk meta — we patch it in below.
+  const muxerCfg = (codec === 'avc')
+    ? { codec: 'avc', width: w, height: h }
+    : { codec: 'hevc', width: w, height: h };
+  const muxerOpts = {
+    target: new Mp4Muxer.ArrayBufferTarget(),
+    video: muxerCfg,
+    fastStart: 'in-memory',
+    // mp4-muxer 4.x rejects chunks if the first DTS isn't 0. Source mp4 timestamps
+    // can start at any CTS — auto-offset normalises them.
+    firstTimestampBehavior: 'offset',
+  };
+  // Audio: only enable if we'll actually feed chunks. Audio passthrough is best-effort
+  // in v0.1 — if it errors we'll skip and keep video.
+  let muxAudio = false;
+  if (audioTrack) {
+    muxerOpts.audio = {
+      codec: 'aac',
+      sampleRate: audioTrack.audio.sample_rate,
+      numberOfChannels: audioTrack.audio.channel_count,
+    };
+    muxAudio = true;
+  }
+  const muxer = new Mp4Muxer.Muxer(muxerOpts);
+
+  // ---- 2. set up encoder/decoder accel modes (probe HW first, fall back to SW) ----
+  let encCfg = (codec === 'avc')
+    ? { codec: 'avc1.640034', width: w, height: h, bitrate: 25_000_000, framerate: Math.round(fps), avc: { format: 'avc' } }
+    : { codec: 'hvc1.1.6.L153.B0', width: w, height: h, bitrate: 15_000_000, framerate: Math.round(fps) };
+  for (const accel of ['prefer-hardware', 'no-preference']) {
+    try {
+      const r = await VideoEncoder.isConfigSupported({ ...encCfg, hardwareAcceleration: accel });
+      if (r.supported) { encCfg = { ...encCfg, hardwareAcceleration: accel }; log('encoder accel:', accel); break; }
+    } catch (_) {}
+  }
+  // Pre-compute decoder accel mode here so we can use it inside the (non-async) onSamples callback.
+  let decAccel = 'no-preference';
+  for (const accel of ['prefer-hardware', 'no-preference']) {
+    try {
+      const r = await VideoDecoder.isConfigSupported({
+        codec: videoTrack.codec, codedWidth: w, codedHeight: h, hardwareAcceleration: accel,
+      });
+      if (r.supported) { decAccel = accel; log('decoder accel:', accel); break; }
+    } catch (_) {}
+  }
+
+  const encoder = new VideoEncoder({
+    output: (chunk, meta) => {
+      // Defensive: some Chrome builds don't emit colorSpace in decoderConfig.
+      // mp4-muxer 5.x reads it at finalize and crashes if missing.
+      if (meta && meta.decoderConfig && !meta.decoderConfig.colorSpace) {
+        meta.decoderConfig.colorSpace = {
+          primaries: 'bt709', transfer: 'bt709',
+          matrix: 'bt709', fullRange: false,
+        };
+      }
+      try {
+        muxer.addVideoChunk(chunk, meta);
+      } catch (e) {
+        log('muxer.addVideoChunk error', e.message);
+      }
+    },
+    error: (e) => log('encoder error', e.message),
+  });
+  encoder.configure(encCfg);
+  log('encoder ready', encCfg);
+
+  // ---- 3. set up GL shader ----
+  const glCanvas = document.createElement('canvas');
+  const shader = new GLShader(glCanvas, w, h);
+  log('webgl2 shader compiled');
+
+  // ---- 4. process: pump file via mp4box, decode, shade, encode ----
+  let frameIdx = 0;
+  const startTime = performance.now();
+  const state = { gains: null, los: null, his: null, mR: null, mG: null, mB: null };
+  const scratchCanvas = new OffscreenCanvas(Math.max(w >> 2, 64), Math.max(h >> 2, 36));
+  const params = {
+    strength: parseInt($('strength').value, 10) / 100,
+    redAlpha: parseInt($('redalpha').value, 10) / 100,
+    sat: 1.10,
+    scurve: true,
+    emaAlpha: 0.20,
+  };
+
+  const decoder = new VideoDecoder({
+    output: async (frame) => {
+      try {
+        // Compute stats on a CPU readback (small downsample)
+        const stats = computeFrameStats(frame, scratchCanvas, scratchCanvas.width, scratchCanvas.height);
+        // EMA across frames
+        if (state.gains) {
+          stats.gains.R = ema(state.gains.R, stats.gains.R, params.emaAlpha);
+          stats.gains.G = ema(state.gains.G, stats.gains.G, params.emaAlpha);
+          stats.gains.B = ema(state.gains.B, stats.gains.B, params.emaAlpha);
+          stats.los.R = ema(state.los.R, stats.los.R, params.emaAlpha);
+          stats.los.G = ema(state.los.G, stats.los.G, params.emaAlpha);
+          stats.los.B = ema(state.los.B, stats.los.B, params.emaAlpha);
+          stats.his.R = ema(state.his.R, stats.his.R, params.emaAlpha);
+          stats.his.G = ema(state.his.G, stats.his.G, params.emaAlpha);
+          stats.his.B = ema(state.his.B, stats.his.B, params.emaAlpha);
+          stats.mR = ema(state.mR, stats.mR, params.emaAlpha);
+          stats.mG = ema(state.mG, stats.mG, params.emaAlpha);
+          stats.mB = ema(state.mB, stats.mB, params.emaAlpha);
+        }
+        Object.assign(state, stats);
+
+        // Build LUTs (per-frame; mostly stable due to EMA)
+        const gains = [stats.gains.B, stats.gains.G, stats.gains.R];
+        const los   = [stats.los.B,   stats.los.G,   stats.los.R];
+        const his   = [stats.his.B,   stats.his.G,   stats.his.R];
+        const luts = buildLuts(gains, los, his, params.scurve, params.sat);
+        // luts[0]=B, luts[1]=G, luts[2]=R — bind to shader R/G/B as expected
+        shader.uploadLut(shader.texLutB, luts[0]);
+        shader.uploadLut(shader.texLutG, luts[1]);
+        shader.uploadLut(shader.texLutR, luts[2]);
+
+        // Draw frame through shader
+        shader.draw(frame, {
+          strength: params.strength,
+          redAlpha: params.redAlpha,
+          meanR: stats.mR, meanG: stats.mG, meanB: stats.mB,
+        });
+
+        // Capture rendered output as a new VideoFrame
+        const outFrame = new VideoFrame(glCanvas, {
+          timestamp: frame.timestamp,
+          duration: frame.duration,
+        });
+        frame.close();
+
+        // Encode (force keyframe periodically so the file is seekable)
+        const keyFrame = (frameIdx % Math.round(fps * 2) === 0);
+        encoder.encode(outFrame, { keyFrame });
+        outFrame.close();
+
+        frameIdx++;
+        if (frameIdx % 5 === 0 || frameIdx === totalFrames) {
+          const elapsed = (performance.now() - startTime) / 1000;
+          const procFps = frameIdx / elapsed;
+          const eta = (totalFrames - frameIdx) / Math.max(procFps, 0.1);
+          $('progress-bar').style.width = (frameIdx / totalFrames * 100) + '%';
+          $('prog-l').textContent = `${frameIdx} / ${totalFrames} frames`;
+          $('prog-r').textContent = `${procFps.toFixed(1)} fps · ETA ${eta.toFixed(0)}s`;
+        }
+      } catch (e) {
+        log('frame error', e.message);
+      }
+    },
+    error: (e) => log('decoder error', e.message),
+  });
+
+  // Decoder configuration needs `description` from mp4box for HEVC/H.264
+  // We get it once from the first sample's description.
+  const file = MP4Box.createFile();
+  let configured = false;
+  let videoSamples = [];
+  let audioChunks = [];
+
+  file.onError = (e) => log('mp4box error', e);
+  file.onReady = (info) => {
+    const v = info.videoTracks[0];
+    const a = info.audioTracks[0];
+    file.setExtractionOptions(v.id, null, { nbSamples: 1, rapAlignement: false });
+    if (a) file.setExtractionOptions(a.id, null, { nbSamples: 1, rapAlignement: false });
+    file.start();
+  };
+
+  file.onSamples = (id, user, samples) => {
+    if (!configured && id === videoTrack.id) {
+      // Build the description (avcC / hvcC) from mp4box trak info
+      const trak = file.getTrackById(id);
+      const desc = buildDescription(trak);
+      decoder.configure({
+        codec: videoTrack.codec,
+        codedWidth: w, codedHeight: h,
+        description: desc,
+        hardwareAcceleration: decAccel,   // precomputed in runPipeline setup
+      });
+      configured = true;
+      log('decoder configured with description', desc.byteLength + 'b accel=' + decAccel);
+    }
+    if (id === videoTrack.id) {
+      for (const s of samples) {
+        const chunk = new EncodedVideoChunk({
+          type: s.is_sync ? 'key' : 'delta',
+          timestamp: s.cts * 1_000_000 / s.timescale,
+          duration: s.duration * 1_000_000 / s.timescale,
+          data: s.data,
+        });
+        decoder.decode(chunk);
+      }
+    } else if (muxAudio && audioTrack && id === audioTrack.id) {
+      for (const s of samples) {
+        const chunk = new EncodedAudioChunk({
+          type: 'key',  // AAC is all-key
+          timestamp: s.cts * 1_000_000 / s.timescale,
+          duration: s.duration * 1_000_000 / s.timescale,
+          data: s.data,
+        });
+        try {
+          muxer.addAudioChunk(chunk);
+        } catch (e) {
+          // First audio chunk may need a description (AAC ASC). If we can't supply it,
+          // disable audio for this run so we still produce a valid video output.
+          if (muxAudio) {
+            log('audio mux failed, disabling audio for this output:', e.message);
+            muxAudio = false;
+          }
+        }
+      }
+    }
+  };
+
+  // Pump the file
+  log('reading source file…');
+  const reader = new FileReader();
+  let offset = 0;
+  const CHUNK = 8 * 1024 * 1024;
+  await new Promise((resolve, reject) => {
+    function readNext() {
+      if (offset >= sourceFile.size) {
+        file.flush();
+        resolve();
+        return;
+      }
+      const slice = sourceFile.slice(offset, offset + CHUNK);
+      reader.onerror = reject;
+      reader.onload = (e) => {
+        const ab = e.target.result;
+        ab.fileStart = offset;
+        file.appendBuffer(ab);
+        offset += CHUNK;
+        // Yield to UI between chunks
+        setTimeout(readNext, 0);
+      };
+      reader.readAsArrayBuffer(slice);
+    }
+    readNext();
+  });
+
+  log('source pumped; flushing decoder');
+  await decoder.flush();
+  await encoder.flush();
+  log('decoder + encoder flushed');
+
+  // mp4-muxer 4.x: finalize() returns void; output is on target.buffer.
+  // mp4-muxer 5.x: finalize() returns the buffer directly.
+  // Try both to stay compatible.
+  const ret = muxer.finalize();
+  const ab = ret && ret.byteLength ? ret : (muxer.target && muxer.target.buffer);
+  if (!ab || !ab.byteLength) throw new Error('muxer produced no output');
+  const blob = new Blob([ab], { type: 'video/mp4' });
+  const url = URL.createObjectURL(blob);
+  const dl = $('dl');
+  dl.href = url;
+  const stem = sourceFile.name.replace(/\.[^.]+$/, '');
+  dl.download = `${stem}_uw_s${parseInt($('strength').value, 10)}_${codec}.mp4`;
+  $('result').classList.add('on');
+  log('done', { sizeMB: (blob.size / 1024 / 1024).toFixed(1), durSec: ((performance.now() - startTime) / 1000).toFixed(1) });
+  $('go').disabled = false;
+}
+
+// ---------- Build avcC / hvcC description from mp4box trak ----------
+function buildDescription(trak) {
+  // For mp4box, the description bytes live in trak.mdia.minf.stbl.stsd.entries[0]
+  // We need the avcC/hvcC box bytes.
+  for (const entry of trak.mdia.minf.stbl.stsd.entries) {
+    const box = entry.avcC || entry.hvcC || entry.vpcC || entry.av1C;
+    if (!box) continue;
+    // mp4box exposes a write(stream) — use a DataStream to capture.
+    const stream = new DataStream(undefined, 0, DataStream.BIG_ENDIAN);
+    box.write(stream);
+    // Strip outer 8-byte box header (size + type)
+    return new Uint8Array(stream.buffer, 8);
+  }
+  throw new Error('no avcC/hvcC found in track');
+}
+
+log('scuba-color v0.1 ready · WebCodecs:', typeof VideoEncoder !== 'undefined');
+</script>
+</body>
+</html>

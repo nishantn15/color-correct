@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+<title>scuba-color — WebCodecs capability probe</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  :root {
+    --bg-0:   #050a13;
+    --bg-1:   #0a1320;
+    --bg-2:   #11203a;
+    --ink-0:  #e9f1ff;
+    --ink-1:  #c8d6ee;
+    --ink-2:  #8aa0c1;
+    --ink-3:  #56698a;
+    --accent: #34d2c8;
+    --lume:   #d8ff5a;
+    --lume-glow: rgba(216,255,90,.55);
+    --good:   #4ad28a;
+    --warn:   #ffb444;
+    --bad:    #ff5c52;
+    --case:   #0e1722;
+  }
+  html, body {
+    margin: 0; padding: 0;
+    background: radial-gradient(ellipse at 50% -10%, #14304f 0%, var(--bg-0) 55%, #02060c 100%);
+    color: var(--ink-0);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, "Helvetica Neue", Arial, sans-serif;
+    min-height: 100vh;
+  }
+  body {
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+    max-width: 760px; margin: 0 auto;
+  }
+  header {
+    display: flex; align-items: center; gap: 10px;
+    padding: 14px 16px 10px;
+    border-bottom: 1px solid rgba(255,255,255,.06);
+  }
+  .logo {
+    width: 34px; height: 34px; border-radius: 9px;
+    background: radial-gradient(circle at 30% 25%, #2c5e7a 0%, #0c1828 65%);
+    display: grid; place-items: center;
+    color: var(--lume); font-weight: 800; font-size: 15px;
+    text-shadow: 0 0 6px var(--lume-glow);
+    box-shadow: inset 0 0 0 1px rgba(255,255,255,.12);
+  }
+  h1 { font-size: 16px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; margin: 0; }
+  .sub { font-size: 11px; color: var(--ink-2); letter-spacing: .08em; margin-top: 2px; }
+  main { padding: 16px; }
+  section { margin-bottom: 22px; }
+  section h2 {
+    font-size: 12px; font-weight: 700; letter-spacing: .12em;
+    text-transform: uppercase; color: var(--ink-2);
+    margin: 0 0 10px;
+  }
+  .card {
+    background: var(--bg-1);
+    border: 1px solid rgba(255,255,255,.06);
+    border-radius: 12px;
+    padding: 14px 16px;
+  }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th { text-align: left; font-weight: 600; color: var(--ink-2); padding: 6px 8px; border-bottom: 1px solid rgba(255,255,255,.08); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  td { padding: 8px; border-bottom: 1px solid rgba(255,255,255,.04); vertical-align: top; }
+  tr:last-child td { border-bottom: none; }
+  .res-yes { color: var(--good); font-weight: 700; }
+  .res-no  { color: var(--bad); font-weight: 700; }
+  .res-pending { color: var(--ink-3); font-style: italic; }
+  .res-hw  { color: var(--lume); }
+  .res-sw  { color: var(--warn); }
+  .pill {
+    display: inline-block;
+    padding: 2px 8px; border-radius: 999px;
+    font-size: 11px; font-weight: 700; letter-spacing: .04em;
+    text-transform: uppercase;
+  }
+  .pill-yes { background: rgba(74,210,138,.14); color: var(--good); border: 1px solid rgba(74,210,138,.3); }
+  .pill-no  { background: rgba(255,92,82,.14);  color: var(--bad);  border: 1px solid rgba(255,92,82,.3); }
+  .pill-hw  { background: rgba(216,255,90,.10); color: var(--lume); border: 1px solid rgba(216,255,90,.35); }
+  .pill-sw  { background: rgba(255,180,68,.12); color: var(--warn); border: 1px solid rgba(255,180,68,.35); }
+  code { background: rgba(255,255,255,.06); padding: 1px 6px; border-radius: 4px; font-size: 12px; }
+  .meta { font-size: 12px; color: var(--ink-2); }
+  .meta b { color: var(--ink-1); font-weight: 600; }
+  .verdict {
+    margin-top: 10px;
+    padding: 12px 14px;
+    border-radius: 10px;
+    font-size: 14px;
+    line-height: 1.5;
+  }
+  .verdict.go    { background: rgba(74,210,138,.10); border: 1px solid rgba(74,210,138,.4); }
+  .verdict.maybe { background: rgba(255,180,68,.10); border: 1px solid rgba(255,180,68,.4); }
+  .verdict.stop  { background: rgba(255,92,82,.10); border: 1px solid rgba(255,92,82,.4); }
+  .verdict h3 { margin: 0 0 6px; font-size: 14px; }
+  details { margin-top: 8px; }
+  summary { cursor: pointer; color: var(--ink-2); font-size: 12px; }
+  pre {
+    margin-top: 8px; max-height: 240px; overflow: auto;
+    padding: 10px; border-radius: 6px;
+    background: var(--case); border: 1px solid rgba(255,255,255,.06);
+    font-size: 11px; font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    color: var(--ink-1);
+    white-space: pre-wrap;
+  }
+  .small { font-size: 11px; color: var(--ink-3); }
+  footer {
+    text-align: center; font-size: 11px; color: var(--ink-3);
+    padding: 16px;
+    border-top: 1px solid rgba(255,255,255,.04);
+    margin-top: 28px;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">SC</div>
+  <div>
+    <h1>scuba-color</h1>
+    <div class="sub">webcodecs capability probe</div>
+  </div>
+</header>
+
+<main>
+
+<section>
+  <h2>Environment</h2>
+  <div class="card">
+    <table id="env">
+      <tr><td><b>WebCodecs API</b></td><td id="env-api">checking…</td></tr>
+      <tr><td><b>Secure context</b></td><td id="env-sec">—</td></tr>
+      <tr><td><b>Hardware concurrency</b></td><td id="env-cores">—</td></tr>
+      <tr><td><b>GPU vendor</b></td><td id="env-gpu">—</td></tr>
+      <tr><td><b>GPU renderer</b></td><td id="env-rend">—</td></tr>
+      <tr><td><b>User agent</b></td><td id="env-ua" class="small">—</td></tr>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h2>Decode capability</h2>
+  <div class="card">
+    <table id="tbl-dec">
+      <thead><tr><th>Codec</th><th>Resolution</th><th>Supported</th><th>HW</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h2>Encode capability</h2>
+  <div class="card">
+    <table id="tbl-enc">
+      <thead><tr><th>Codec</th><th>Resolution</th><th>Supported</th><th>HW</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h2>Verdict</h2>
+  <div id="verdict" class="verdict maybe">
+    <h3>Probing…</h3>
+    <div>Running capability checks. Should take &lt; 2 seconds.</div>
+  </div>
+</section>
+
+<section>
+  <h2>Raw results</h2>
+  <details>
+    <summary>Show JSON</summary>
+    <pre id="raw">probing…</pre>
+  </details>
+</section>
+
+</main>
+
+<footer>
+  scuba-color probe • single static HTML • runs entirely in your browser
+</footer>
+
+<script>
+'use strict';
+
+// ---------- env detection ----------
+function setText(id, txt, cls) {
+  const el = document.getElementById(id);
+  el.textContent = txt;
+  if (cls) el.className = cls;
+}
+
+function detectEnv() {
+  setText('env-api',
+    typeof VideoDecoder !== 'undefined' && typeof VideoEncoder !== 'undefined'
+      ? 'available' : 'NOT AVAILABLE — Chrome/Edge 94+ or Safari 17.4+ required',
+    typeof VideoDecoder !== 'undefined' ? 'res-yes' : 'res-no'
+  );
+  setText('env-sec',
+    window.isSecureContext ? 'yes (https or localhost)' : 'no — WebCodecs may be limited',
+    window.isSecureContext ? 'res-yes' : 'res-no'
+  );
+  setText('env-cores', String(navigator.hardwareConcurrency || '?'));
+  setText('env-ua', navigator.userAgent);
+
+  // GPU info via WebGL
+  try {
+    const c = document.createElement('canvas');
+    const gl = c.getContext('webgl2') || c.getContext('webgl');
+    if (gl) {
+      const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+      if (dbg) {
+        setText('env-gpu',  gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL)   || 'unknown');
+        setText('env-rend', gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) || 'unknown');
+      } else {
+        setText('env-gpu',  gl.getParameter(gl.VENDOR)   || 'unknown');
+        setText('env-rend', gl.getParameter(gl.RENDERER) || 'unknown');
+      }
+    }
+  } catch (e) {
+    setText('env-gpu', 'WebGL probe failed: ' + e.message);
+  }
+}
+
+// ---------- codec configs ----------
+const RESOLUTIONS = [
+  { label: '4K (3840×2160)', width: 3840, height: 2160 },
+  { label: '1080p (1920×1080)', width: 1920, height: 1080 },
+];
+
+// codec strings to test
+const DECODE_CODECS = [
+  { codec: 'hev1.1.6.L150.B0', label: 'HEVC Main L5.0' },
+  { codec: 'hev1.1.6.L153.B0', label: 'HEVC Main L5.1' },
+  { codec: 'hev1.2.4.L153.B0', label: 'HEVC Main10 L5.1' },
+  { codec: 'avc1.640034',      label: 'H.264 High L5.2' },
+  { codec: 'avc1.64002a',      label: 'H.264 High L4.2' },
+  { codec: 'av01.0.13M.08',    label: 'AV1 Main L5.1' },
+];
+
+const ENCODE_CODECS = [
+  { codec: 'avc1.640034', label: 'H.264 High L5.2', avc: { format: 'avc' } },
+  { codec: 'avc1.64002a', label: 'H.264 High L4.2', avc: { format: 'avc' } },
+  { codec: 'hvc1.1.6.L150.B0', label: 'HEVC Main L5.0' },
+  { codec: 'hvc1.1.6.L153.B0', label: 'HEVC Main L5.1' },
+  { codec: 'av01.0.13M.08',    label: 'AV1 Main L5.1' },
+];
+
+// ---------- probe runner ----------
+async function probeDecode(codec, w, h) {
+  if (typeof VideoDecoder === 'undefined') return { supported: false, reason: 'no api' };
+  const cfg = {
+    codec: codec.codec,
+    codedWidth: w, codedHeight: h,
+    hardwareAcceleration: 'prefer-hardware',
+  };
+  try {
+    const r = await VideoDecoder.isConfigSupported(cfg);
+    return r;
+  } catch (e) {
+    return { supported: false, reason: e.message };
+  }
+}
+
+async function probeEncode(codec, w, h) {
+  if (typeof VideoEncoder === 'undefined') return { supported: false, reason: 'no api' };
+  const cfg = {
+    codec: codec.codec,
+    width: w, height: h,
+    bitrate: 25_000_000,
+    framerate: 30,
+    hardwareAcceleration: 'prefer-hardware',
+  };
+  if (codec.avc) cfg.avc = codec.avc;
+  try {
+    const r = await VideoEncoder.isConfigSupported(cfg);
+    return r;
+  } catch (e) {
+    return { supported: false, reason: e.message };
+  }
+}
+
+function rowFor(codec, res, result) {
+  const tr = document.createElement('tr');
+  const td1 = document.createElement('td');
+  const td2 = document.createElement('td');
+  const td3 = document.createElement('td');
+  const td4 = document.createElement('td');
+
+  td1.innerHTML = `<b>${codec.label}</b><br><span class="small">${codec.codec}</span>`;
+  td2.textContent = res.label;
+
+  const supported = !!result.supported;
+  const pill = document.createElement('span');
+  pill.className = 'pill ' + (supported ? 'pill-yes' : 'pill-no');
+  pill.textContent = supported ? 'yes' : 'no';
+  td3.appendChild(pill);
+  if (!supported && result.reason) {
+    const r = document.createElement('div');
+    r.className = 'small';
+    r.textContent = result.reason;
+    td3.appendChild(r);
+  }
+
+  if (supported) {
+    const hw = result.config && result.config.hardwareAcceleration;
+    const isHw = hw === 'prefer-hardware' || hw === 'require-hardware';
+    const hwPill = document.createElement('span');
+    hwPill.className = 'pill ' + (isHw ? 'pill-hw' : 'pill-sw');
+    hwPill.textContent = isHw ? 'hw' : (hw || 'sw');
+    td4.appendChild(hwPill);
+  } else {
+    td4.textContent = '—';
+  }
+
+  tr.append(td1, td2, td3, td4);
+  return tr;
+}
+
+async function runAll() {
+  detectEnv();
+
+  if (typeof VideoDecoder === 'undefined' || typeof VideoEncoder === 'undefined') {
+    document.querySelector('#verdict').className = 'verdict stop';
+    document.querySelector('#verdict').innerHTML =
+      '<h3>WebCodecs not available</h3>' +
+      '<div>Your browser does not expose <code>VideoDecoder</code> / <code>VideoEncoder</code>.<br>' +
+      'Open this page in <b>Chrome 94+</b> on Android, or <b>Safari 17.4+</b> on iOS.</div>';
+    document.querySelector('#raw').textContent = 'no webcodecs api';
+    return;
+  }
+
+  const decBody = document.querySelector('#tbl-dec tbody');
+  const encBody = document.querySelector('#tbl-enc tbody');
+
+  const allResults = { decode: [], encode: [] };
+
+  // Decode probes
+  for (const codec of DECODE_CODECS) {
+    for (const res of RESOLUTIONS) {
+      const r = await probeDecode(codec, res.width, res.height);
+      decBody.appendChild(rowFor(codec, res, r));
+      allResults.decode.push({ codec: codec.codec, label: codec.label, w: res.width, h: res.height, result: r });
+    }
+  }
+  // Encode probes
+  for (const codec of ENCODE_CODECS) {
+    for (const res of RESOLUTIONS) {
+      const r = await probeEncode(codec, res.width, res.height);
+      encBody.appendChild(rowFor(codec, res, r));
+      allResults.encode.push({ codec: codec.codec, label: codec.label, w: res.width, h: res.height, result: r });
+    }
+  }
+
+  document.querySelector('#raw').textContent = JSON.stringify(allResults, null, 2);
+
+  // ---------- verdict ----------
+  // We need: HEVC dec + (H.264 OR HEVC) enc, all at 4K, all HW
+  const decHevc4K_hw = allResults.decode.find(x =>
+    x.codec.startsWith('hev1') && x.w === 3840 && x.result.supported &&
+    x.result.config && /hardware/.test(x.result.config.hardwareAcceleration || '')
+  );
+  const encH264_4K_hw = allResults.encode.find(x =>
+    x.codec.startsWith('avc1') && x.w === 3840 && x.result.supported &&
+    x.result.config && /hardware/.test(x.result.config.hardwareAcceleration || '')
+  );
+  const encHevc_4K_hw = allResults.encode.find(x =>
+    x.codec.startsWith('hvc1') && x.w === 3840 && x.result.supported &&
+    x.result.config && /hardware/.test(x.result.config.hardwareAcceleration || '')
+  );
+  const encH264_1080_hw = allResults.encode.find(x =>
+    x.codec.startsWith('avc1') && x.w === 1920 && x.result.supported &&
+    x.result.config && /hardware/.test(x.result.config.hardwareAcceleration || '')
+  );
+
+  const v = document.querySelector('#verdict');
+  if (decHevc4K_hw && (encH264_4K_hw || encHevc_4K_hw)) {
+    v.className = 'verdict go';
+    let enc = encH264_4K_hw ? 'H.264' : 'HEVC';
+    v.innerHTML =
+      '<h3>✓ GO — full HW pipeline available</h3>' +
+      `<div>HEVC <b>HW decode</b> + ${enc} <b>HW encode</b> at 4K both supported.<br>` +
+      'Real-time processing in the browser is possible.</div>';
+  } else if (decHevc4K_hw && encH264_1080_hw) {
+    v.className = 'verdict maybe';
+    v.innerHTML =
+      '<h3>~ partial — drop encode to 1080p</h3>' +
+      '<div>4K HEVC decode is HW-accelerated, but 4K H.264 encode is not. ' +
+      'PWA viable if output is 1080p H.264 (still real-time at lower res).</div>';
+  } else if (encH264_1080_hw || encH264_4K_hw) {
+    v.className = 'verdict maybe';
+    v.innerHTML =
+      '<h3>~ partial — software decode only</h3>' +
+      '<div>HEVC decode is not HW-accelerated; the decode step will run on CPU. ' +
+      'Encode is HW. Decoding falls back to software but the rest of the pipeline is fast.</div>';
+  } else {
+    v.className = 'verdict stop';
+    v.innerHTML =
+      '<h3>✕ STOP — no usable HW path</h3>' +
+      '<div>Neither HEVC nor H.264 hardware encode is available. ' +
+      'PWA path would be CPU-only. Recommend Termux Path 1 or native Android app instead.</div>';
+  }
+}
+
+runAll();
+</script>
+</body>
+</html>
