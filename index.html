@@ -1110,20 +1110,39 @@ async function handleFile(file) {
 }
 
 async function demuxInfo(file) {
+  // Codex review (doc 12) caught: this used to read the ENTIRE source file
+  // even after onReady fired — for a 158 MB GoPro clip it loaded all 158 MB
+  // into FileReader+mp4box buffers just to display metadata. Now we stop the
+  // read loop the instant onReady fires and flush mp4box's internal state.
   return new Promise((resolve, reject) => {
     const mp4 = MP4Box.createFile();
-    mp4.onError = (e) => reject(new Error('mp4box: ' + e));
-    mp4.onReady = (info) => resolve(info);
-
     const chunkSize = 4 * 1024 * 1024;
     const reader = new FileReader();
     let offset = 0;
+    let done = false;
+
+    mp4.onError = (e) => {
+      if (!done) reject(new Error('mp4box: ' + e));
+      done = true;
+    };
+    mp4.onReady = (info) => {
+      done = true;
+      try { mp4.flush(); } catch (_) {}
+      resolve(info);
+    };
+
     function readNext() {
-      if (offset >= file.size) return;
-      const slice = file.slice(offset, offset + chunkSize);
+      if (done || offset >= file.size) return;
+      const start = offset;
+      const slice = file.slice(start, Math.min(start + chunkSize, file.size));
+      reader.onerror = () => {
+        if (!done) reject(reader.error || new Error('FileReader failed'));
+        done = true;
+      };
       reader.onload = (e) => {
+        if (done) return;
         const ab = e.target.result;
-        ab.fileStart = offset;
+        ab.fileStart = start;
         mp4.appendBuffer(ab);
         offset += chunkSize;
         readNext();
@@ -1348,10 +1367,18 @@ function ensureStatsBuf(N) {
   return _statsBuf;
 }
 
+// Cached 2D context for the scratch canvas — codex review (doc 12) flagged
+// that we were calling getContext() per frame, which can re-init state.
+let _statsCtx = null;
+let _statsCanvas = null;
 function computeFrameStats(frame, scratchCanvas, downsampleW, downsampleH) {
-  const ctx = scratchCanvas.getContext('2d', { willReadFrequently: true });
-  scratchCanvas.width = downsampleW;
-  scratchCanvas.height = downsampleH;
+  if (_statsCanvas !== scratchCanvas) {
+    _statsCanvas = scratchCanvas;
+    _statsCtx = scratchCanvas.getContext('2d', { willReadFrequently: true });
+    scratchCanvas.width = downsampleW;
+    scratchCanvas.height = downsampleH;
+  }
+  const ctx = _statsCtx;
   ctx.drawImage(frame, 0, 0, downsampleW, downsampleH);
   // getImageData still allocates a Uint8ClampedArray, but it's released as
   // soon as this function returns (no closure captures it).
@@ -1559,7 +1586,11 @@ async function runPipeline() {
   let encoderInflight = 0;
   const startTime = performance.now();
   const state = { gains: null, los: null, his: null, mR: null, mG: null, mB: null };
-  const scratchCanvas = new OffscreenCanvas(Math.max(w >> 2, 64), Math.max(h >> 2, 36));
+  // Stats canvas: small fixed size, NOT proportional to source resolution.
+  // 320x180 is plenty for scene-level white-balance + percentile bounds and
+  // shrinks the per-frame ImageData allocation from ~2 MB at 4K (960x540)
+  // to ~225 KB. Codex review doc 12 §3.
+  const scratchCanvas = new OffscreenCanvas(320, 180);
   const params = {
     strength: parseInt($('strength').value, 10) / 100,
     redAlpha: parseInt($('redalpha').value, 10) / 100,
@@ -1572,6 +1603,10 @@ async function runPipeline() {
     output: (frame) => {
       // Decrement own counter immediately on output (one frame finished decoding)
       decoderInflight = Math.max(0, decoderInflight - 1);
+      // Codex review (doc 12) caught: error paths used to leak the input
+      // VideoFrame and any partially-created outFrame. try/finally guarantees
+      // both get closed even if computeFrameStats / shader / encode throw.
+      let outFrame = null;
       try {
         const stats = computeFrameStats(frame, scratchCanvas, scratchCanvas.width, scratchCanvas.height);
         if (state.gains) {
@@ -1604,12 +1639,10 @@ async function runPipeline() {
           meanR: stats.mR, meanG: stats.mG, meanB: stats.mB,
         });
 
-        const outFrame = new VideoFrame(glCanvas, { timestamp: frame.timestamp, duration: frame.duration });
-        frame.close();
+        outFrame = new VideoFrame(glCanvas, { timestamp: frame.timestamp, duration: frame.duration });
         const keyFrame = (frameIdx % Math.round(fps * 2) === 0);
         encoderInflight++;
         encoder.encode(outFrame, { keyFrame });
-        outFrame.close();
 
         frameIdx++;
         if (frameIdx % 5 === 0 || frameIdx === totalFrames) {
@@ -1626,6 +1659,11 @@ async function runPipeline() {
         }
       } catch (e) {
         log('frame error', e.message);
+      } finally {
+        try { frame.close(); } catch (_) {}
+        if (outFrame) {
+          try { outFrame.close(); } catch (_) {}
+        }
       }
     },
     error: (e) => log('decoder error', e.message),
